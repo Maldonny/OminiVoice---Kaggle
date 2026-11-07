@@ -23,7 +23,7 @@
 #
 #    !pip install -q --force-reinstall torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 #    !pip install -q --force-reinstall torchcodec==0.7
-#    !pip install -q omnivoice gradio pydub soundfile
+#    !pip install -q omnivoice gradio pydub soundfile Pillow
 #    !apt-get -qq install -y ffmpeg
 #    import os; os._exit(0)
 #
@@ -41,15 +41,21 @@
 import os
 import time
 import threading
+import subprocess
 import numpy as np
 import soundfile as sf
 import torch
 import gradio as gr
+from PIL import Image, ImageOps, ImageFilter, ImageEnhance
 from omnivoice import OmniVoice
 from pydub import AudioSegment
 
 MODEL_NAME = "k2-fsa/OmniVoice"
 SAMPLE_RATE = 24000  # OmniVoice sempre gera áudio a 24kHz
+VIDEO_WIDTH = 1920   # Resolução Full HD (Largura)
+VIDEO_HEIGHT = 1080  # Resolução Full HD (Altura)
+AUDIO_BITRATE = "320k"          # Qualidade máxima de áudio (320 kbps)
+VIDEO_AUDIO_SAMPLE_RATE = "48000"  # Taxa de amostragem padrão de estúdio para vídeo (48 kHz)
 
 # --- Túnel: usando o compartilhamento nativo do Gradio ---
 # (ngrok estava retornando 524; a URL do Gradio é temporária mas confiável)
@@ -177,10 +183,101 @@ def preparar_ref_audio(ref_path, max_segundos=10.0):
 # abaixo na interface) e cole o texto manualmente no campo "Texto da
 # referência" para pular a retranscrição em cada chunk.
 
+# 3.2 Preparação da Imagem de Fundo em Full HD (1920x1080)
+def preparar_imagem_fullhd(imagem_path, modo_ajuste="Preencher tela (Cortar bordas - Cover)"):
+    """
+    Prepara um quadro estático em resolução exata Full HD (1920x1080) usando Lanczos
+    antes de enviar ao FFmpeg, garantindo máxima nitidez e codificação ultrarrápida.
+    """
+    target_size = (VIDEO_WIDTH, VIDEO_HEIGHT)
+    temp_img_path = "fundo_fullhd_temp.png"
+
+    if not imagem_path or not os.path.exists(imagem_path):
+        # Se nenhuma imagem for enviada, cria um quadro escuro elegante em Full HD
+        frame = Image.new("RGB", target_size, color=(18, 18, 24))
+        frame.save(temp_img_path, format="PNG")
+        return temp_img_path
+
+    img = Image.open(imagem_path)
+    img = ImageOps.exif_transpose(img).convert("RGB")
+
+    if modo_ajuste == "Preencher tela (Cortar bordas - Cover)":
+        frame = ImageOps.fit(img, target_size, method=Image.Resampling.LANCZOS)
+    elif modo_ajuste == "Ajustar inteira com fundo desfocado (Blur)":
+        bg = ImageOps.fit(img, target_size, method=Image.Resampling.LANCZOS)
+        bg = bg.filter(ImageFilter.GaussianBlur(radius=32))
+        bg = ImageEnhance.Brightness(bg).enhance(0.6)
+        fg = ImageOps.contain(img, target_size, method=Image.Resampling.LANCZOS)
+        offset = ((VIDEO_WIDTH - fg.width) // 2, (VIDEO_HEIGHT - fg.height) // 2)
+        bg.paste(fg, offset)
+        frame = bg
+    elif modo_ajuste == "Ajustar inteira com bordas pretas (Contain)":
+        frame = ImageOps.pad(img, target_size, method=Image.Resampling.LANCZOS, color=(0, 0, 0))
+    else:  # "Esticar imagem (1920x1080 exato)"
+        frame = img.resize(target_size, resample=Image.Resampling.LANCZOS)
+
+    frame.save(temp_img_path, format="PNG")
+    return temp_img_path
+
+
+# 3.3 Renderização de Vídeo MP4 Full HD (1920x1080) com Áudio na Melhor Qualidade Possível
+def gerar_video_mp4_fullhd(wav_path, imagem_path, output_mp4, duracao_segundos, modo_ajuste):
+    """
+    Gera um arquivo .mp4 em Full HD (1920x1080, H.264 CRF 18 -tune stillimage)
+    combinando a imagem de fundo e o áudio WAV PCM 24-bit sem perdas codificado em
+    AAC 320 kbps / 48 kHz Estéreo (melhor qualidade suportada pelo container MP4).
+    """
+    temp_img_path = preparar_imagem_fullhd(imagem_path, modo_ajuste)
+    try:
+        cmd = [
+            "ffmpeg",
+            "-y",
+            "-loop", "1",
+            "-framerate", "24",
+            "-i", temp_img_path,
+            "-i", wav_path,
+            "-t", f"{duracao_segundos:.3f}",
+            "-c:v", "libx264",
+            "-tune", "stillimage",
+            "-preset", "veryfast",
+            "-crf", "18",
+            "-pix_fmt", "yuv420p",
+            "-vf", f"scale={VIDEO_WIDTH}:{VIDEO_HEIGHT},setsar=1",
+            "-c:a", "aac",
+            "-b:a", AUDIO_BITRATE,
+            "-ar", VIDEO_AUDIO_SAMPLE_RATE,
+            "-ac", "2",
+            "-shortest",
+            "-movflags", "+faststart",
+            output_mp4,
+        ]
+        resultado = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if resultado.returncode != 0:
+            raise RuntimeError(f"FFmpeg retornou erro ao gerar o vídeo:\n{resultado.stderr[-600:]}")
+        return output_mp4
+    finally:
+        if os.path.exists(temp_img_path):
+            try:
+                os.remove(temp_img_path)
+            except OSError:
+                pass
+
+
 # 4. Função de geração com chunking e barra de progresso do Gradio
-def sintetizar_audio(texto, audio_referencia, texto_referencia, idioma, num_steps, velocidade, progress=gr.Progress()):
+def sintetizar_audio(
+    texto,
+    audio_referencia,
+    texto_referencia,
+    idioma,
+    num_steps,
+    velocidade,
+    imagem_fundo,
+    modo_imagem,
+    formato_saida,
+    progress=gr.Progress()
+):
     if not texto.strip():
-        return None, "Erro: Por favor, digite um roteiro para ser narrado."
+        return None, None, "Erro: Por favor, digite um roteiro para ser narrado."
 
     try:
         ref_path = preparar_ref_audio(audio_referencia) if audio_referencia else None
@@ -224,21 +321,63 @@ def sintetizar_audio(texto, audio_referencia, texto_referencia, idioma, num_step
         if chunks_audio:
             chunks_audio.pop()  # remove o último silêncio
 
-        progress(0.95, desc="Concatenando áudios e finalizando...")
+        progress(0.90, desc="Concatenando áudio mestre em 24-bit sem perdas...")
 
         final_wav = np.concatenate(chunks_audio)
+        duracao_segundos = len(final_wav) / float(SAMPLE_RATE)
 
-        # Salvar o wav temporário
+        # Salvar o WAV mestre em PCM 24-bit (sem perdas) para alimentar o vídeo e o MP3 com fidelidade máxima
         temp_wav = "fala_gerada_temp.wav"
-        sf.write(temp_wav, final_wav, SAMPLE_RATE)
+        sf.write(temp_wav, final_wav, SAMPLE_RATE, subtype="PCM_24")
 
-        # Converter para MP3 (bem mais leve pra trafegar pelo túnel do Gradio)
-        output_file = "fala_gerada.mp3"
-        AudioSegment.from_wav(temp_wav).export(output_file, format="mp3", bitrate="128k")
-        os.remove(temp_wav)
+        gerar_mp4 = formato_saida in (
+            "Vídeo MP4 (Full HD) + Áudio MP3",
+            "Apenas Vídeo MP4 (Full HD)",
+        )
+        gerar_mp3 = formato_saida in (
+            "Vídeo MP4 (Full HD) + Áudio MP3",
+            "Apenas Áudio MP3 (320kbps)",
+        )
 
-        print(f"[✓] Áudio completo gerado com sucesso (MP3, 128kbps)!")
-        return output_file, f"Sucesso! Roteiro de {total_chunks} partes sintetizado, unido com pausas naturais e exportado em MP3."
+        output_mp4 = None
+        output_mp3 = None
+        detalhes_exportacao = []
+
+        try:
+            if gerar_mp4:
+                progress(0.94, desc="Renderizando vídeo MP4 em Full HD (1920x1080) com áudio 320kbps...")
+                output_mp4 = "video_gerado_fullhd.mp4"
+                gerar_video_mp4_fullhd(
+                    wav_path=temp_wav,
+                    imagem_path=imagem_fundo,
+                    output_mp4=output_mp4,
+                    duracao_segundos=duracao_segundos,
+                    modo_ajuste=modo_imagem,
+                )
+                print(f"[✓] Vídeo Full HD (1920x1080) gerado com sucesso (AAC {AUDIO_BITRATE}, 48kHz)!")
+                detalhes_exportacao.append(f"Vídeo MP4 Full HD (1920x1080, AAC {AUDIO_BITRATE}/48kHz)")
+
+            if gerar_mp3:
+                progress(0.98, desc="Exportando áudio MP3 em qualidade máxima (320kbps)...")
+                output_mp3 = "fala_gerada.mp3"
+                AudioSegment.from_file(temp_wav, format="wav").export(
+                    output_mp3,
+                    format="mp3",
+                    bitrate=AUDIO_BITRATE,
+                    parameters=["-ar", VIDEO_AUDIO_SAMPLE_RATE, "-q:a", "0"]
+                )
+                print(f"[✓] Áudio completo gerado com sucesso (MP3, {AUDIO_BITRATE}, 48kHz)!")
+                detalhes_exportacao.append(f"Áudio MP3 ({AUDIO_BITRATE}/48kHz)")
+        finally:
+            if os.path.exists(temp_wav):
+                os.remove(temp_wav)
+
+        resumo_formatos = " e ".join(detalhes_exportacao)
+        msg_sucesso = (
+            f"Sucesso! Roteiro de {total_chunks} partes ({duracao_segundos:.1f}s) sintetizado "
+            f"e exportado em: {resumo_formatos}."
+        )
+        return output_mp4, output_mp3, msg_sucesso
 
     except Exception as e:
         erro_str = str(e)
@@ -252,16 +391,16 @@ def sintetizar_audio(texto, audio_referencia, texto_referencia, idioma, num_step
                 "!pip install -q --force-reinstall torchcodec==0.7"
             )
         else:
-            erro_msg = f"Erro durante a geração do áudio: {erro_str}"
+            erro_msg = f"Erro durante a geração: {erro_str}"
         print(f"[✗] {erro_msg}")
-        return None, erro_msg
+        return None, None, erro_msg
 
-# 4. Construir Interface Gradio (Interface Web)
-with gr.Blocks(title="VMC VOICE - OmniVoice / Nuvem GPU") as demo:
+# 5. Construir Interface Gradio (Interface Web)
+with gr.Blocks(title="VMC VOICE - OmniVoice / Vídeo Full HD & Voz IA") as demo:
     gr.Markdown("""
-    # 🎙️ VMC VOICE - OmniVoice (Kaggle GPU)
-    Estúdio de voz IA rodando na nuvem com OmniVoice (600+ idiomas, licença Apache-2.0).
-    Escreva o roteiro, envie a voz de referência para clonar e gere áudio.
+    # 🎙️🎬 VMC VOICE - OmniVoice (Clonagem de Voz + Vídeo Full HD 1080p)
+    Estúdio de voz e vídeo IA rodando na nuvem com **OmniVoice** (600+ idiomas, licença Apache-2.0).
+    Escreva o roteiro, envie a voz de referência para clonar, escolha uma **imagem de fundo** e gere seu vídeo **.MP4 em Full HD (1920x1080)** com a **melhor qualidade de áudio possível (320 kbps / 48 kHz)**.
     """)
 
     with gr.Row():
@@ -272,11 +411,22 @@ with gr.Blocks(title="VMC VOICE - OmniVoice / Nuvem GPU") as demo:
                 lines=8
             )
 
-            idioma = gr.Dropdown(
-                choices=["pt", "en", "es", "fr", "de", "it", "zh", "ja"],
-                value="pt",
-                label="Idioma da síntese"
-            )
+            with gr.Row():
+                idioma = gr.Dropdown(
+                    choices=["pt", "en", "es", "fr", "de", "it", "zh", "ja"],
+                    value="pt",
+                    label="Idioma da síntese"
+                )
+
+                formato_saida = gr.Dropdown(
+                    choices=[
+                        "Vídeo MP4 (Full HD) + Áudio MP3",
+                        "Apenas Vídeo MP4 (Full HD)",
+                        "Apenas Áudio MP3 (320kbps)"
+                    ],
+                    value="Vídeo MP4 (Full HD) + Áudio MP3",
+                    label="Formato de Saída"
+                )
 
             num_steps = gr.Slider(
                 minimum=8,
@@ -294,6 +444,23 @@ with gr.Blocks(title="VMC VOICE - OmniVoice / Nuvem GPU") as demo:
                 label="Velocidade da fala (speed). Padrão: 1.0."
             )
 
+            imagem_fundo = gr.Image(
+                label="🖼️ Imagem de Fundo do Vídeo (Opcional — gera vídeo MP4 em Full HD 1920x1080)",
+                type="filepath",
+                sources=["upload", "clipboard"]
+            )
+
+            modo_imagem = gr.Dropdown(
+                choices=[
+                    "Preencher tela (Cortar bordas - Cover)",
+                    "Ajustar inteira com fundo desfocado (Blur)",
+                    "Ajustar inteira com bordas pretas (Contain)",
+                    "Esticar imagem (1920x1080 exato)"
+                ],
+                value="Preencher tela (Cortar bordas - Cover)",
+                label="Enquadramento da Imagem em Full HD (1920x1080)"
+            )
+
         with gr.Column():
             voz_ref = gr.Audio(
                 label="Áudio de Referência (Voz a ser clonada, 3-10s recomendado)",
@@ -309,24 +476,39 @@ with gr.Blocks(title="VMC VOICE - OmniVoice / Nuvem GPU") as demo:
                 lines=2
             )
 
-            btn_gerar = gr.Button("🔥 Gerar Narração / Clonar Voz", variant="primary")
+            btn_gerar = gr.Button("🔥 Gerar Vídeo Full HD (.MP4) / Narração", variant="primary")
 
-            audio_saida = gr.Audio(label="Áudio Gerado", type="filepath")
+            video_saida = gr.Video(
+                label="🎬 Vídeo Gerado (MP4 Full HD 1920x1080 • Áudio AAC 320kbps / 48kHz)"
+            )
+            audio_saida = gr.Audio(
+                label="🎵 Áudio Gerado (MP3 320kbps / 48kHz)",
+                type="filepath"
+            )
             status = gr.Textbox(label="Status / Log de Execução", interactive=False)
 
     btn_gerar.click(
         fn=sintetizar_audio,
-        inputs=[roteiro, voz_ref, texto_ref, idioma, num_steps, velocidade],
-        outputs=[audio_saida, status]
+        inputs=[
+            roteiro,
+            voz_ref,
+            texto_ref,
+            idioma,
+            num_steps,
+            velocidade,
+            imagem_fundo,
+            modo_imagem,
+            formato_saida
+        ],
+        outputs=[video_saida, audio_saida, status]
     )
 
     gr.Markdown("""
-    *Dica:* Para clonagem de voz, o OmniVoice recomenda referências de **3 a 10 segundos**
-    (diferente do Chatterbox, que pedia 10-20s) — áudios mais longos deixam a inferência
-    mais lenta e podem até piorar a clonagem. Use ambiente silencioso, sem música de fundo.
-    Se o texto de referência não for informado, o modelo transcreve automaticamente via Whisper.
+    *Dicas:*
+    - **Clonagem de Voz**: O OmniVoice recomenda referências de **3 a 10 segundos** em ambiente silencioso e sem música de fundo. Se o texto de referência não for informado, o modelo transcreve automaticamente via Whisper.
+    - **Vídeo em Full HD (.mp4)**: Envie qualquer imagem (horizontal, quadrada ou vertical) e escolha como ela deve se ajustar em **1920x1080**. O áudio do vídeo é codificado diretamente da matriz **WAV 24-bit sem perdas** para **AAC 320 kbps a 48 kHz Estéreo** (qualidade máxima).
     """)
 
-# 5. Iniciar a aplicação e gerar o link público via túnel do próprio Gradio
+# 6. Iniciar a aplicação e gerar o link público via túnel do próprio Gradio
 if __name__ == "__main__":
     demo.launch(share=True, server_name="0.0.0.0", server_port=GRADIO_PORT, debug=True)

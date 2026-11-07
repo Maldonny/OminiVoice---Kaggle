@@ -35,7 +35,7 @@ O projeto disponibiliza uma solução pronta para narrar roteiros e clonar timbr
 Ao contrário de modelos convencionais pesados ou complexos de configurar, este ambiente foi lapidado para:
 1. Resolver automaticamente as dependências estritas do ecossistema PyTorch no Kaggle/Colab (`torch`, `torchvision`, `torchaudio`, `torchcodec`).
 2. Permitir síntese de roteiros longos sem cortes bruscos através de particionamento dinâmico (*chunking*).
-3. Entregar o áudio final diretamente em formato compactado **MP3 (128 kbps)**.
+3. Gerar **vídeos em Full HD (`1920x1080`, `.mp4`)** com imagem de fundo personalizada e **qualidade máxima de áudio (AAC 320 kbps / 48 kHz Estéreo)** a partir de matriz **WAV PCM 24-bit sem perdas**, além de exportação em **MP3 de alta definição (320 kbps)**.
 4. Manter o kernel ativo em segundo plano com um mecanismo de **Heartbeat** anti-inatividade.
 
 ---
@@ -46,7 +46,8 @@ Ao contrário de modelos convencionais pesados ou complexos de configurar, este 
 - **Multilíngue Nativo**: Suporte oficial a mais de 600 idiomas (incluindo Português `pt`, Inglês `en`, Espanhol `es`, Francês `fr`, Alemão `de`, Italiano `it`, etc.).
 - **Particionamento Inteligente (*Chunking*)**: Divide textos longos respeitando pontuações e limites de caracteres (~140 caracteres por trecho), inserindo pausas naturais de silêncio (400 ms) entre cada sentença.
 - **Corte Automático de Referência**: Otimiza automaticamente áudios de entrada longos, recortando os primeiros 10 segundos para máxima fidelidade e menor consumo de VRAM.
-- **Exportação Otimizada**: Converte a síntese interna de 24 kHz WAV para MP3 leve via `pydub`/`ffmpeg`, facilitando a reprodução imediata no navegador e download rápido.
+- **Exportação de Vídeo em Full HD (`.mp4` 1080p)**: Permite enviar uma **imagem de fundo** e gera um vídeo `.mp4` em resolução **Full HD (`1920x1080`)** com modos de enquadramento (Preencher/Cover, Fundo Desfocado/Blur, Bordas Pretas/Contain ou Esticar).
+- **Áudio na Melhor Qualidade Possível**: A síntese é consolidada em **WAV PCM 24-bit sem perdas** e codificada diretamente em **AAC 320 kbps a 48 kHz Estéreo** no vídeo `.mp4` e em **MP3 320 kbps (48 kHz)** no arquivo de áudio.
 - **Túnel Seguro Gradio**: Gera uma URL pública temporária (`https://xxxx.gradio.live`) sem a necessidade de contas ou túneis externos com limite de requisição.
 - **Heartbeat Anti-Timeout**: Thread leve que envia micropulsos para a GPU a cada 4 minutos, prevenindo encerramentos prematuros por inatividade da sessão de nuvem.
 
@@ -79,7 +80,7 @@ Ao contrário de modelos convencionais pesados ou complexos de configurar, este 
    ```python
    !pip install -q --force-reinstall torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
    !pip install -q --force-reinstall torchcodec==0.7
-   !pip install -q omnivoice gradio pydub soundfile
+   !pip install -q omnivoice gradio pydub soundfile Pillow
    !apt-get -qq install -y ffmpeg
    import os; os._exit(0)
    ```
@@ -115,7 +116,7 @@ source venv/bin/activate  # No Linux/macOS
 # Instale os pacotes compatíveis
 pip install --force-reinstall torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 pip install --force-reinstall torchcodec==0.7
-pip install omnivoice gradio pydub soundfile
+pip install omnivoice gradio pydub soundfile Pillow
 
 # Certifique-se de ter o ffmpeg instalado no sistema
 # Ubuntu/Debian: sudo apt install ffmpeg
@@ -130,17 +131,22 @@ python "Code Python/clonagem_omini.py"
 ## 🎛️ Como Usar a Interface
 
 1. **Roteiro (Texto a ser falado)**: Digite ou cole o texto que deseja sintetizar. O sistema aceita desde frases curtas até roteiros completos com múltiplos parágrafos.
-2. **Idioma da síntese**: Escolha o código do idioma desejado (ex.: `pt` para Português, `en` para Inglês).
-3. **Áudio de Referência (Opcional para clonagem)**:
+2. **Idioma da síntese e Formato de Saída**:
+   - Escolha o código do idioma desejado (ex.: `pt` para Português, `en` para Inglês).
+   - Escolha se deseja exportar **Vídeo MP4 (Full HD) + Áudio MP3**, **Apenas Vídeo MP4 (Full HD)** ou **Apenas Áudio MP3 (320kbps)**.
+3. **Imagem de Fundo do Vídeo (Opcional)**:
+   - Envie qualquer imagem para servir de plano de fundo do vídeo `.mp4` em **Full HD (`1920x1080`)** (se não enviar, o sistema gera automaticamente um quadro escuro em 1080p).
+   - Selecione o **Enquadramento da Imagem em Full HD**: *Preencher tela (Cover)*, *Ajustar inteira com fundo desfocado (Blur)*, *Ajustar inteira com bordas pretas (Contain)* ou *Esticar imagem*.
+4. **Áudio de Referência (Opcional para clonagem)**:
    - Grave diretamente pelo microfone ou faça upload de um arquivo de áudio (`.wav`, `.mp3`).
    - Recomenda-se entre **3 a 10 segundos** de fala clara e sem música de fundo.
-4. **Texto da referência (Altamente Recomendado)**:
+5. **Texto da referência (Altamente Recomendado)**:
    - Digite a transcrição exata das palavras ditas no áudio de referência.
    - Isso elimina a necessidade de o Whisper transcrever repetidamente o áudio a cada bloco de texto, tornando a geração muito mais rápida.
-5. **Ajustes Avançados**:
+6. **Ajustes Avançados**:
    - **Passos de difusão (`num_steps`)**: `32` (qualidade balanceada) ou `16` (geração ultrarrápida).
    - **Velocidade da fala (`speed`)**: Ajuste entre `0.5` e `1.5` (padrão: `1.0`).
-6. Clique em **🔥 Gerar Narração / Clonar Voz** e acompanhe a barra de progresso em tempo real.
+7. Clique em **🔥 Gerar Vídeo Full HD (.MP4) / Narração** e acompanhe a barra de progresso em tempo real.
 
 ---
 
