@@ -331,7 +331,10 @@ def gerar_video_mp4_fullhd(
                     progresso_info[chave.strip()] = valor.strip()
 
                 if linha == "progress=continue" or linha == "progress=end":
-                    frame_atual = int(progresso_info.get("frame", 0) or 0)
+                    try:
+                        frame_atual = max(0, int(progresso_info.get("frame", 0) or 0))
+                    except ValueError:
+                        frame_atual = 0
                     fps_atual = progresso_info.get("fps", "0.0")
                     bitrate_atual = progresso_info.get("bitrate", "N/A")
                     velocidade_atual = progresso_info.get("speed", "N/A")
@@ -548,6 +551,8 @@ def sintetizar_audio(
         else:
             erro_msg = f"Erro durante a geração: {erro_str}"
         print(f"[✗] {erro_msg}")
+        if logs_execucao:
+            erro_msg = erro_msg + "\n\n" + "\n".join(logs_execucao)
         return None, None, erro_msg
 
 # 5. Construir Interface Gradio (Interface Web)
