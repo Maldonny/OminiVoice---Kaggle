@@ -184,22 +184,42 @@ def preparar_ref_audio(ref_path, max_segundos=10.0):
 # referência" para pular a retranscrição em cada chunk.
 
 # 3.2 Preparação da Imagem de Fundo em Full HD (1920x1080)
-def preparar_imagem_fullhd(imagem_path, modo_ajuste="Preencher tela (Cortar bordas - Cover)"):
+def preparar_imagem_fullhd(imagem_path, modo_ajuste="Preencher tela (Cortar bordas - Cover)", logs_execucao=None):
     """
     Prepara um quadro estático em resolução exata Full HD (1920x1080) usando Lanczos
     antes de enviar ao FFmpeg, garantindo máxima nitidez e codificação ultrarrápida.
     """
+    def registrar_log(msg):
+        print(msg)
+        if logs_execucao is not None:
+            logs_execucao.append(msg)
+
+    t0 = time.time()
     target_size = (VIDEO_WIDTH, VIDEO_HEIGHT)
     temp_img_path = "fundo_fullhd_temp.png"
 
+    registrar_log("─" * 65)
+    registrar_log("[🎬 VÍDEO 1/3] Preparando quadro de fundo em Full HD (1920x1080)...")
+
     if not imagem_path or not os.path.exists(imagem_path):
-        # Se nenhuma imagem for enviada, cria um quadro escuro elegante em Full HD
+        registrar_log("  ├─ Imagem de fundo: Nenhuma enviada (gerando fundo escuro padrão #121218)")
         frame = Image.new("RGB", target_size, color=(18, 18, 24))
         frame.save(temp_img_path, format="PNG")
+        tamanho_kb = os.path.getsize(temp_img_path) / 1024.0
+        dt_ms = (time.time() - t0) * 1000.0
+        registrar_log(f"  └─ Quadro Full HD (1920x1080) gerado em {dt_ms:.0f}ms ({tamanho_kb:.1f} KB)")
         return temp_img_path
 
+    nome_arq = os.path.basename(imagem_path)
     img = Image.open(imagem_path)
+    larg_orig, alt_orig = img.size
+    modo_cor_orig = img.mode
     img = ImageOps.exif_transpose(img).convert("RGB")
+
+    registrar_log(f"  ├─ Arquivo de entrada : {nome_arq}")
+    registrar_log(f"  ├─ Resolução original : {larg_orig}x{alt_orig} px (Modo de cor: {modo_cor_orig})")
+    registrar_log(f"  ├─ Resolução alvo     : {VIDEO_WIDTH}x{VIDEO_HEIGHT} px (Full HD 1080p, 16:9)")
+    registrar_log(f"  ├─ Modo de ajuste     : {modo_ajuste} (Filtro: Lanczos)")
 
     if modo_ajuste == "Preencher tela (Cortar bordas - Cover)":
         frame = ImageOps.fit(img, target_size, method=Image.Resampling.LANCZOS)
@@ -211,29 +231,56 @@ def preparar_imagem_fullhd(imagem_path, modo_ajuste="Preencher tela (Cortar bord
         offset = ((VIDEO_WIDTH - fg.width) // 2, (VIDEO_HEIGHT - fg.height) // 2)
         bg.paste(fg, offset)
         frame = bg
+        registrar_log(f"  ├─ Composição Blur    : Imagem principal em {fg.width}x{fg.height} centralizada em ({offset[0]}, {offset[1]})")
     elif modo_ajuste == "Ajustar inteira com bordas pretas (Contain)":
         frame = ImageOps.pad(img, target_size, method=Image.Resampling.LANCZOS, color=(0, 0, 0))
     else:  # "Esticar imagem (1920x1080 exato)"
         frame = img.resize(target_size, resample=Image.Resampling.LANCZOS)
 
     frame.save(temp_img_path, format="PNG")
+    tamanho_kb = os.path.getsize(temp_img_path) / 1024.0
+    dt_ms = (time.time() - t0) * 1000.0
+    registrar_log(f"  └─ Quadro Full HD salvo temporariamente ({tamanho_kb:.1f} KB) em {dt_ms:.0f}ms")
     return temp_img_path
 
 
 # 3.3 Renderização de Vídeo MP4 Full HD (1920x1080) com Áudio na Melhor Qualidade Possível
-def gerar_video_mp4_fullhd(wav_path, imagem_path, output_mp4, duracao_segundos, modo_ajuste):
+def gerar_video_mp4_fullhd(
+    wav_path,
+    imagem_path,
+    output_mp4,
+    duracao_segundos,
+    modo_ajuste,
+    progress=None,
+    logs_execucao=None
+):
     """
     Gera um arquivo .mp4 em Full HD (1920x1080, H.264 CRF 18 -tune stillimage)
     combinando a imagem de fundo e o áudio WAV PCM 24-bit sem perdas codificado em
-    AAC 320 kbps / 48 kHz Estéreo (melhor qualidade suportada pelo container MP4).
+    AAC 320 kbps / 48 kHz Estéreo (melhor qualidade suportada pelo container MP4),
+    emitindo logs detalhados de cada etapa e do progresso do FFmpeg em tempo real.
     """
-    temp_img_path = preparar_imagem_fullhd(imagem_path, modo_ajuste)
+    def registrar_log(msg):
+        print(msg)
+        if logs_execucao is not None:
+            logs_execucao.append(msg)
+
+    fps_video = 24
+    total_frames_esperados = max(1, int(round(duracao_segundos * fps_video)))
+    wav_tamanho_mb = os.path.getsize(wav_path) / (1024.0 * 1024.0) if os.path.exists(wav_path) else 0.0
+
+    temp_img_path = preparar_imagem_fullhd(imagem_path, modo_ajuste, logs_execucao=logs_execucao)
     try:
+        registrar_log("[🎬 VÍDEO 2/3] Iniciando codificação FFmpeg (Vídeo Full HD + Áudio Mestre)...")
+        registrar_log(f"  ├─ Stream de Vídeo : H.264 (libx264) | {VIDEO_WIDTH}x{VIDEO_HEIGHT} (1080p) | {fps_video} fps | CRF 18 | yuv420p | tune=stillimage")
+        registrar_log(f"  ├─ Stream de Áudio : AAC LC | {AUDIO_BITRATE} | {VIDEO_AUDIO_SAMPLE_RATE} Hz | Estéreo (2 canais) | Fonte: WAV PCM 24-bit ({wav_tamanho_mb:.2f} MB)")
+        registrar_log(f"  ├─ Duração Alvo    : {duracao_segundos:.2f}s (~{total_frames_esperados} quadros)")
+
         cmd = [
             "ffmpeg",
             "-y",
             "-loop", "1",
-            "-framerate", "24",
+            "-framerate", str(fps_video),
             "-i", temp_img_path,
             "-i", wav_path,
             "-t", f"{duracao_segundos:.3f}",
@@ -249,11 +296,92 @@ def gerar_video_mp4_fullhd(wav_path, imagem_path, output_mp4, duracao_segundos, 
             "-ac", "2",
             "-shortest",
             "-movflags", "+faststart",
+            "-progress", "pipe:1",
+            "-nostats",
             output_mp4,
         ]
-        resultado = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if resultado.returncode != 0:
-            raise RuntimeError(f"FFmpeg retornou erro ao gerar o vídeo:\n{resultado.stderr[-600:]}")
+
+        t_inicio_ffmpeg = time.time()
+        processo = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True,
+        )
+
+        # Coletar stderr em thread paralela para evitar deadlock de buffer
+        stderr_linhas = []
+        def ler_stderr(pipe):
+            for linha in pipe:
+                stderr_linhas.append(linha)
+
+        t_err = threading.Thread(target=ler_stderr, args=(processo.stderr,), daemon=True)
+        t_err.start()
+
+        progresso_info = {}
+        ultimo_percentual_logado = -10
+
+        if processo.stdout:
+            for linha in processo.stdout:
+                linha = linha.strip()
+                if "=" in linha:
+                    chave, valor = linha.split("=", 1)
+                    progresso_info[chave.strip()] = valor.strip()
+
+                if linha == "progress=continue" or linha == "progress=end":
+                    frame_atual = int(progresso_info.get("frame", 0) or 0)
+                    fps_atual = progresso_info.get("fps", "0.0")
+                    bitrate_atual = progresso_info.get("bitrate", "N/A")
+                    velocidade_atual = progresso_info.get("speed", "N/A")
+                    out_time_us = progresso_info.get("out_time_us") or progresso_info.get("out_time_ms") or "0"
+
+                    try:
+                        tempo_codificado_s = max(0.0, int(out_time_us) / 1_000_000.0)
+                    except ValueError:
+                        tempo_codificado_s = frame_atual / float(fps_video)
+
+                    pct_video = min(100.0, (tempo_codificado_s / max(0.1, duracao_segundos)) * 100.0)
+
+                    # Atualizar barra de progresso do Gradio entre 90% e 98%
+                    if progress is not None:
+                        fracao_gradio = 0.90 + 0.08 * (pct_video / 100.0)
+                        progress(
+                            fracao_gradio,
+                            desc=(
+                                f"Renderizando MP4 Full HD: {pct_video:.0f}% "
+                                f"(Quadro {frame_atual}/{total_frames_esperados} • Vel: {velocidade_atual})"
+                            ),
+                        )
+
+                    # Logar no console a cada >= 20% de avanço ou ao finalizar
+                    if int(pct_video) >= ultimo_percentual_logado + 20 or linha == "progress=end":
+                        ultimo_percentual_logado = int(pct_video)
+                        print(
+                            f"  │  [FFmpeg {pct_video:5.1f}%] Quadro: {frame_atual}/{total_frames_esperados} | "
+                            f"Tempo: {tempo_codificado_s:.1f}s/{duracao_segundos:.1f}s | "
+                            f"FPS: {fps_atual} | Bitrate: {bitrate_atual} | Velocidade: {velocidade_atual}"
+                        )
+
+        processo.wait()
+        t_err.join(timeout=2.0)
+        tempo_total_ffmpeg = time.time() - t_inicio_ffmpeg
+
+        if processo.returncode != 0:
+            erro_completo = "".join(stderr_linhas)
+            registrar_log(f"[✗ ERRO FFmpeg] Código de saída {processo.returncode}")
+            raise RuntimeError(f"FFmpeg retornou erro ao gerar o vídeo:\n{erro_completo[-800:]}")
+
+        tamanho_mp4_mb = os.path.getsize(output_mp4) / (1024.0 * 1024.0) if os.path.exists(output_mp4) else 0.0
+        fator_tempo_real = duracao_segundos / max(0.01, tempo_total_ffmpeg)
+
+        registrar_log("[🎬 VÍDEO 3/3] Renderização MP4 Full HD concluída com sucesso!")
+        registrar_log(f"  ├─ Arquivo gerado        : {output_mp4} ({tamanho_mp4_mb:.2f} MB)")
+        registrar_log(f"  ├─ Tempo de renderização : {tempo_total_ffmpeg:.2f}s ({fator_tempo_real:.1f}x mais rápido que o tempo real)")
+        registrar_log(f"  └─ Faststart (Streaming) : Ativado (moov atom otimizado para reprodução web imediata)")
+        registrar_log("─" * 65)
+
         return output_mp4
     finally:
         if os.path.exists(temp_img_path):
@@ -279,26 +407,35 @@ def sintetizar_audio(
     if not texto.strip():
         return None, None, "Erro: Por favor, digite um roteiro para ser narrado."
 
+    logs_execucao = []
+    t_inicio_total = time.time()
+
     try:
         ref_path = preparar_ref_audio(audio_referencia) if audio_referencia else None
         ref_text = texto_referencia.strip() if texto_referencia and texto_referencia.strip() else None
 
         if ref_path and not ref_text:
-            print("[!] Nenhum texto de referência informado — o Whisper vai transcrever "
-                  "automaticamente a CADA chunk, o que deixa a geração mais lenta. "
-                  "Preencha o campo de texto da referência pra evitar isso.")
+            aviso_whisper = (
+                "[!] Aviso: Nenhum texto de referência informado — o Whisper vai transcrever "
+                "automaticamente a CADA chunk (mais lento)."
+            )
+            print(aviso_whisper)
+            logs_execucao.append(aviso_whisper)
 
         chunks = split_text_into_chunks(texto, max_chars=140)
         total_chunks = len(chunks)
-        print(f"[*] Roteiro dividido em {total_chunks} partes para síntese consistente.")
+        msg_chunks = f"[*] Roteiro dividido em {total_chunks} parte(s) para síntese consistente."
+        print(msg_chunks)
+        logs_execucao.append(msg_chunks)
 
         chunks_audio = []
         silence_samples = int(SAMPLE_RATE * 0.40)
         silence = np.zeros(silence_samples, dtype=np.float32)
 
+        t_inicio_tts = time.time()
         for i, chunk in enumerate(chunks):
-            progresso_txt = f"Parte {i+1} de {total_chunks}... ({chunk[:25]}...)"
-            progress((i) / total_chunks, desc=progresso_txt)
+            progresso_txt = f"Sintetizando voz: Parte {i+1} de {total_chunks}... ({chunk[:25]}...)"
+            progress((i / total_chunks) * 0.88, desc=progresso_txt)
             print(f"[*] [{i+1}/{total_chunks}] Sintetizando: {chunk}")
 
             gen_kwargs = dict(
@@ -321,7 +458,8 @@ def sintetizar_audio(
         if chunks_audio:
             chunks_audio.pop()  # remove o último silêncio
 
-        progress(0.90, desc="Concatenando áudio mestre em 24-bit sem perdas...")
+        tempo_tts = time.time() - t_inicio_tts
+        progress(0.89, desc="Consolidando áudio mestre em WAV PCM 24-bit sem perdas...")
 
         final_wav = np.concatenate(chunks_audio)
         duracao_segundos = len(final_wav) / float(SAMPLE_RATE)
@@ -329,6 +467,13 @@ def sintetizar_audio(
         # Salvar o WAV mestre em PCM 24-bit (sem perdas) para alimentar o vídeo e o MP3 com fidelidade máxima
         temp_wav = "fala_gerada_temp.wav"
         sf.write(temp_wav, final_wav, SAMPLE_RATE, subtype="PCM_24")
+        wav_mb = os.path.getsize(temp_wav) / (1024.0 * 1024.0)
+        msg_wav = (
+            f"[✓ ÁUDIO MESTRE] Síntese concluída em {tempo_tts:.2f}s | "
+            f"Duração do áudio: {duracao_segundos:.2f}s | Matriz WAV PCM 24-bit ({SAMPLE_RATE} Hz): {wav_mb:.2f} MB"
+        )
+        print(msg_wav)
+        logs_execucao.append(msg_wav)
 
         gerar_mp4 = formato_saida in (
             "Vídeo MP4 (Full HD) + Áudio MP3",
@@ -345,7 +490,7 @@ def sintetizar_audio(
 
         try:
             if gerar_mp4:
-                progress(0.94, desc="Renderizando vídeo MP4 em Full HD (1920x1080) com áudio 320kbps...")
+                progress(0.90, desc="Iniciando renderização do vídeo MP4 em Full HD (1920x1080)...")
                 output_mp4 = "video_gerado_fullhd.mp4"
                 gerar_video_mp4_fullhd(
                     wav_path=temp_wav,
@@ -353,12 +498,14 @@ def sintetizar_audio(
                     output_mp4=output_mp4,
                     duracao_segundos=duracao_segundos,
                     modo_ajuste=modo_imagem,
+                    progress=progress,
+                    logs_execucao=logs_execucao,
                 )
-                print(f"[✓] Vídeo Full HD (1920x1080) gerado com sucesso (AAC {AUDIO_BITRATE}, 48kHz)!")
                 detalhes_exportacao.append(f"Vídeo MP4 Full HD (1920x1080, AAC {AUDIO_BITRATE}/48kHz)")
 
             if gerar_mp3:
-                progress(0.98, desc="Exportando áudio MP3 em qualidade máxima (320kbps)...")
+                progress(0.98, desc="Exportando áudio MP3 em qualidade máxima (320kbps / 48kHz)...")
+                t_mp3 = time.time()
                 output_mp3 = "fala_gerada.mp3"
                 AudioSegment.from_file(temp_wav, format="wav").export(
                     output_mp3,
@@ -366,18 +513,26 @@ def sintetizar_audio(
                     bitrate=AUDIO_BITRATE,
                     parameters=["-ar", VIDEO_AUDIO_SAMPLE_RATE, "-q:a", "0"]
                 )
-                print(f"[✓] Áudio completo gerado com sucesso (MP3, {AUDIO_BITRATE}, 48kHz)!")
+                mp3_mb = os.path.getsize(output_mp3) / (1024.0 * 1024.0) if os.path.exists(output_mp3) else 0.0
+                msg_mp3 = (
+                    f"[✓ ÁUDIO MP3] Exportado em {time.time() - t_mp3:.2f}s -> "
+                    f"{output_mp3} ({mp3_mb:.2f} MB | {AUDIO_BITRATE} @ {VIDEO_AUDIO_SAMPLE_RATE} Hz)"
+                )
+                print(msg_mp3)
+                logs_execucao.append(msg_mp3)
                 detalhes_exportacao.append(f"Áudio MP3 ({AUDIO_BITRATE}/48kHz)")
         finally:
             if os.path.exists(temp_wav):
                 os.remove(temp_wav)
 
+        tempo_total = time.time() - t_inicio_total
         resumo_formatos = " e ".join(detalhes_exportacao)
-        msg_sucesso = (
-            f"Sucesso! Roteiro de {total_chunks} partes ({duracao_segundos:.1f}s) sintetizado "
-            f"e exportado em: {resumo_formatos}."
+        cabecalho_sucesso = (
+            f"✅ CONCLUÍDO EM {tempo_total:.2f}s! Roteiro de {total_chunks} parte(s) ({duracao_segundos:.1f}s) "
+            f"exportado em: {resumo_formatos}."
         )
-        return output_mp4, output_mp3, msg_sucesso
+        relatorio_final = cabecalho_sucesso + "\n\n" + "\n".join(logs_execucao)
+        return output_mp4, output_mp3, relatorio_final
 
     except Exception as e:
         erro_str = str(e)
@@ -485,7 +640,12 @@ with gr.Blocks(title="VMC VOICE - OmniVoice / Vídeo Full HD & Voz IA") as demo:
                 label="🎵 Áudio Gerado (MP3 320kbps / 48kHz)",
                 type="filepath"
             )
-            status = gr.Textbox(label="Status / Log de Execução", interactive=False)
+            status = gr.Textbox(
+                label="📋 Status / Log Detalhado de Renderização (Áudio & Vídeo MP4)",
+                interactive=False,
+                lines=12,
+                max_lines=20
+            )
 
     btn_gerar.click(
         fn=sintetizar_audio,
